@@ -331,7 +331,7 @@ class _ProjectPageState extends State<ProjectPage> {
           : Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: BoxDecoration(
-                color: theme.colorScheme.surfaceContainerHighest,
+                color: theme.colorScheme.surfaceVariant,
                 border: Border(top: BorderSide(color: theme.dividerColor, width: 0.5)),
               ),
               child: Row(
@@ -366,7 +366,7 @@ class _ProjectPageState extends State<ProjectPage> {
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHigh,
+        color: theme.colorScheme.surfaceVariant.withOpacity(0.5),
         border: Border(bottom: BorderSide(color: theme.dividerColor, width: 0.5)),
       ),
       child: Row(
