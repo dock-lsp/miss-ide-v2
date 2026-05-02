@@ -1,73 +1,26 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
-/// 文件写入历史记录项
-class FileWriteRecord {
-  final DateTime time;
-  final String filePath;
-  final String operation;
-  final bool success;
-
-  FileWriteRecord({
-    required this.time,
-    required this.filePath,
-    required this.operation,
-    this.success = true,
-  });
-}
-
-/// 进程/任务项
-class ProcessItem {
-  final String id;
-  final String name;
-  final String description;
-  final DateTime startTime;
-  final bool isRunning;
-
-  ProcessItem({
-    required this.id,
-    required this.name,
-    required this.description,
-    required this.startTime,
-    this.isRunning = true,
-  });
-}
-
-/// 文件树项
-class FileTreeItem {
+/// 文件树节点
+class FileTreeNode {
   final String name;
   final String path;
   final bool isDirectory;
-  List<FileTreeItem> children;
+  final List<FileTreeNode> children;
   bool isExpanded;
 
-  FileTreeItem({
+  FileTreeNode({
     required this.name,
     required this.path,
     required this.isDirectory,
     this.children = const [],
     this.isExpanded = false,
   });
-
-  FileTreeItem copyWith({
-    String? name,
-    String? path,
-    bool? isDirectory,
-    List<FileTreeItem>? children,
-    bool? isExpanded,
-  }) {
-    return FileTreeItem(
-      name: name ?? this.name,
-      path: path ?? this.path,
-      isDirectory: isDirectory ?? this.isDirectory,
-      children: children ?? this.children,
-      isExpanded: isExpanded ?? this.isExpanded,
-    );
-  }
 }
 
-/// 项目页面 - 重新设计版本
+/// 项目页面 - 文件管理器风格
 class ProjectPage extends StatefulWidget {
   final String projectPath;
   final Function(String) onFileSelected;
@@ -84,828 +37,658 @@ class ProjectPage extends StatefulWidget {
   State<ProjectPage> createState() => _ProjectPageState();
 }
 
-class _ProjectPageState extends State<ProjectPage>
-    with SingleTickerProviderStateMixin {
-  late TabController _tabController;
-  final TextEditingController _searchController = TextEditingController();
-  
-  List<FileTreeItem> _rootItems = [];
-  List<FileTreeItem> _filteredItems = [];
+class _ProjectPageState extends State<ProjectPage> {
+  List<FileTreeNode> _rootNodes = [];
   bool _isLoading = true;
-  String _searchQuery = '';
+  String? _selectedPath;
 
-  // 模拟数据：当前进程列表
-  final List<ProcessItem> _processes = [];
-
-  // 模拟数据：文件写入历史
-  final List<FileWriteRecord> _writeHistory = [];
+  // 折叠/展开状态追踪
+  final Set<String> _expandedPaths = {};
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
-    _loadDirectory();
-    _loadMockData();
+    _loadFullTree();
   }
 
-  @override
-  void dispose() {
-    _tabController.dispose();
-    _searchController.dispose();
-    super.dispose();
-  }
-
-  /// 加载模拟数据
-  void _loadMockData() {
-    // 模拟进程数据
-    _processes.addAll([
-      ProcessItem(
-        id: '1',
-        name: 'Flutter Build',
-        description: '正在构建应用...',
-        startTime: DateTime.now().subtract(const Duration(minutes: 2)),
-        isRunning: true,
-      ),
-      ProcessItem(
-        id: '2',
-        name: 'Dependencies Check',
-        description: '检查依赖项...',
-        startTime: DateTime.now().subtract(const Duration(minutes: 1)),
-        isRunning: true,
-      ),
-    ]);
-
-    // 模拟写入历史
-    _writeHistory.addAll([
-      FileWriteRecord(
-        time: DateTime.now().subtract(const Duration(minutes: 5)),
-        filePath: 'lib/main.dart',
-        operation: '保存',
-      ),
-      FileWriteRecord(
-        time: DateTime.now().subtract(const Duration(minutes: 10)),
-        filePath: 'pubspec.yaml',
-        operation: '保存',
-      ),
-      FileWriteRecord(
-        time: DateTime.now().subtract(const Duration(minutes: 15)),
-        filePath: 'lib/app/theme.dart',
-        operation: '新建',
-      ),
-    ]);
-  }
-
-  /// 加载目录结构
-  Future<void> _loadDirectory() async {
+  /// 加载完整文件树
+  Future<void> _loadFullTree() async {
+    setState(() => _isLoading = true);
     try {
-      final items = await _readDirectory(widget.projectPath);
+      final nodes = await _buildTree(widget.projectPath, depth: 0);
       setState(() {
-        _rootItems = items;
-        _filteredItems = items;
+        _rootNodes = nodes;
         _isLoading = false;
       });
     } catch (e) {
-      setState(() {
-        _isLoading = false;
-      });
+      setState(() => _isLoading = false);
     }
   }
 
-  /// 读取目录内容
-  Future<List<FileTreeItem>> _readDirectory(String path) async {
-    final dir = Directory(path);
+  /// 递归构建文件树（限制深度避免卡顿）
+  Future<List<FileTreeNode>> _buildTree(String dirPath, {int depth = 0}) async {
+    final dir = Directory(dirPath);
     if (!await dir.exists()) return [];
 
     final entities = await dir.list().toList();
+
+    // 排序：文件夹在前，文件在后，各自按名称排序
     entities.sort((a, b) {
-      if (a is Directory && b is! Directory) return -1;
-      if (a is! Directory && b is Directory) return 1;
-      return p.basename(a.path).compareTo(p.basename(b.path));
+      final aIsDir = a is Directory;
+      final bIsDir = b is Directory;
+      if (aIsDir && !bIsDir) return -1;
+      if (!aIsDir && bIsDir) return 1;
+      return p.basename(a.path).toLowerCase().compareTo(p.basename(b.path).toLowerCase());
     });
 
-    final items = <FileTreeItem>[];
-    for (var entity in entities) {
+    final nodes = <FileTreeNode>[];
+    for (final entity in entities) {
       final name = p.basename(entity.path);
+
+      // 跳过隐藏文件/目录
       if (name.startsWith('.')) continue;
+      // 跳过常见的大目录
+      if (entity is Directory && (name == 'build' || name == '.dart_tool' || name == 'node_modules' || name == '.gradle')) continue;
 
-      items.add(FileTreeItem(
-        name: name,
-        path: entity.path,
-        isDirectory: entity is Directory,
-        children: entity is Directory ? [] : [],
-      ));
-    }
-    return items;
-  }
-
-  /// 搜索文件
-  void _onSearchChanged(String query) {
-    setState(() {
-      _searchQuery = query.toLowerCase();
-      if (query.isEmpty) {
-        _filteredItems = _rootItems;
-      } else {
-        _filteredItems = _filterItems(_rootItems, query.toLowerCase());
-      }
-    });
-  }
-
-  /// 递归过滤文件项
-  List<FileTreeItem> _filterItems(List<FileTreeItem> items, String query) {
-    final result = <FileTreeItem>[];
-    for (var item in items) {
-      if (item.isDirectory) {
-        final filteredChildren = _filterItems(item.children, query);
-        if (item.name.toLowerCase().contains(query) || filteredChildren.isNotEmpty) {
-          result.add(item.copyWith(children: filteredChildren, isExpanded: true));
+      if (entity is Directory) {
+        // 文件夹：深度 < 2 时预加载子项
+        List<FileTreeNode> children = [];
+        if (depth < 2) {
+          children = await _buildTree(entity.path, depth: depth + 1);
         }
+        nodes.add(FileTreeNode(
+          name: name,
+          path: entity.path,
+          isDirectory: true,
+          children: children,
+        ));
       } else {
-        if (item.name.toLowerCase().contains(query)) {
-          result.add(item);
-        }
+        nodes.add(FileTreeNode(
+          name: name,
+          path: entity.path,
+          isDirectory: false,
+        ));
       }
     }
-    return result;
+    return nodes;
   }
 
-  /// 格式化时间
-  String _formatTime(DateTime time) {
-    final now = DateTime.now();
-    final diff = now.difference(time);
-    if (diff.inMinutes < 1) return '刚刚';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}分钟前';
-    if (diff.inHours < 24) return '${diff.inHours}小时前';
-    return '${diff.inDays}天前';
+  /// 加载子目录（懒加载深层目录）
+  Future<List<FileTreeNode>> _loadChildren(String dirPath) async {
+    return _buildTree(dirPath, depth: 0);
   }
 
   /// 获取文件图标
-  IconData _getFileIcon(String fileName) {
-    final ext = p.extension(fileName).toLowerCase();
+  IconData _getFileIcon(String name, {bool isDir = false, bool isOpen = false}) {
+    if (isDir) return isOpen ? Icons.folder_open : Icons.folder;
+    final ext = p.extension(name).toLowerCase();
     switch (ext) {
-      case '.dart':
-        return Icons.code;
+      case '.dart': return Icons.code;
       case '.yaml':
-      case '.yml':
-        return Icons.settings;
-      case '.json':
-        return Icons.data_object;
-      case '.md':
-        return Icons.article;
+      case '.yml': return Icons.settings;
+      case '.json': return Icons.data_object;
+      case '.md': return Icons.article;
       case '.png':
       case '.jpg':
       case '.jpeg':
       case '.gif':
       case '.svg':
-        return Icons.image;
-      case '.txt':
-        return Icons.text_snippet;
-      case '.xml':
-        return Icons.code;
+      case '.webp': return Icons.image;
+      case '.xml': return Icons.code;
       case '.html':
-      case '.css':
-        return Icons.web;
-      default:
-        return Icons.insert_drive_file;
+      case '.css': return Icons.web;
+      case '.js':
+      case '.ts': return Icons.javascript;
+      case '.py': return Icons.code;
+      case '.java':
+      case '.kt': return Icons.coffee;
+      case '.gradle': return Icons.build;
+      case '.txt': return Icons.text_snippet;
+      case '.lock': return Icons.lock;
+      case '.sh':
+      case '.bat': return Icons.terminal;
+      default: return Icons.insert_drive_file;
     }
   }
 
-  /// 获取文件图标颜色
-  Color _getFileColor(String fileName) {
-    final ext = p.extension(fileName).toLowerCase();
+  /// 获取文件颜色
+  Color _getFileColor(String name, {bool isDir = false}) {
+    if (isDir) return Colors.amber;
+    final ext = p.extension(name).toLowerCase();
     switch (ext) {
-      case '.dart':
-        return Colors.blue;
+      case '.dart': return Colors.blue;
       case '.yaml':
-      case '.yml':
-        return Colors.orange;
-      case '.json':
-        return Colors.amber;
-      case '.md':
-        return Colors.teal;
+      case '.yml': return Colors.orange;
+      case '.json': return Colors.amber;
+      case '.md': return Colors.teal;
       case '.png':
       case '.jpg':
       case '.jpeg':
       case '.gif':
       case '.svg':
-        return Colors.purple;
-      default:
-        return Colors.grey;
+      case '.webp': return Colors.purple;
+      case '.js':
+      case '.ts': return Colors.yellow.shade800;
+      case '.py': return Colors.green;
+      case '.java':
+      case '.kt': return Colors.deepOrange;
+      case '.gradle': return Colors.green.shade700;
+      case '.html': return Colors.orange.shade700;
+      case '.css': return Colors.blue.shade700;
+      case '.xml': return Colors.red.shade400;
+      case '.lock': return Colors.grey;
+      case '.sh':
+      case '.bat': return Colors.green.shade900;
+      default: return Colors.grey.shade600;
     }
   }
 
-  /// 下载整个项目
-  Future<void> _downloadProject() async {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('正在打包项目...'),
-        duration: Duration(seconds: 2),
-      ),
-    );
-    // TODO: 实现项目下载功能
+  /// 获取文件大小字符串
+  String _formatSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+
+  /// 展开全部
+  void _expandAll() async {
+    await _expandNodes(_rootNodes);
+    setState(() {});
+  }
+
+  Future<void> _expandNodes(List<FileTreeNode> nodes) async {
+    for (final node in nodes) {
+      if (node.isDirectory) {
+        if (node.children.isEmpty) {
+          final children = await _loadChildren(node.path);
+          node.children.addAll(children);
+        }
+        _expandedPaths.add(node.path);
+        node.isExpanded = true;
+        await _expandNodes(node.children.toList());
+      }
+    }
+  }
+
+  /// 折叠全部
+  void _collapseAll() {
+    _collapseNodes(_rootNodes);
+    _expandedPaths.clear();
+    setState(() {});
+  }
+
+  void _collapseNodes(List<FileTreeNode> nodes) {
+    for (final node in nodes) {
+      if (node.isDirectory) {
+        node.isExpanded = false;
+        _collapseNodes(node.children.toList());
+      }
+    }
+  }
+
+  /// 计算总文件数
+  int _countFiles(List<FileTreeNode> nodes) {
+    int count = 0;
+    for (final node in nodes) {
+      if (node.isDirectory) {
+        count += _countFiles(node.children.toList());
+      } else {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /// 计算总目录数
+  int _countDirs(List<FileTreeNode> nodes) {
+    int count = 0;
+    for (final node in nodes) {
+      if (node.isDirectory) {
+        count += 1 + _countDirs(node.children.toList());
+      }
+    }
+    return count;
   }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final projectName = p.basename(widget.projectPath);
+
     return Scaffold(
       appBar: AppBar(
         toolbarHeight: 48,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, size: 20),
+          onPressed: widget.onClose,
+        ),
         title: Row(
           children: [
-            const Icon(Icons.folder, size: 20),
+            Icon(Icons.folder, size: 18, color: theme.colorScheme.primary),
             const SizedBox(width: 8),
-            Text(
-              p.basename(widget.projectPath),
-              style: const TextStyle(fontSize: 14),
+            Flexible(
+              child: Text(
+                projectName,
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
           ],
         ),
         actions: [
+          // 展开全部
           IconButton(
-            icon: const Icon(Icons.close, size: 20),
-            onPressed: widget.onClose,
-            tooltip: '关闭',
+            icon: const Icon(Icons.unfold_more, size: 20),
+            onPressed: _expandAll,
+            tooltip: '展开全部',
+          ),
+          // 折叠全部
+          IconButton(
+            icon: const Icon(Icons.unfold_less, size: 20),
+            onPressed: _collapseAll,
+            tooltip: '折叠全部',
+          ),
+          // 刷新
+          IconButton(
+            icon: const Icon(Icons.refresh, size: 20),
+            onPressed: _loadFullTree,
+            tooltip: '刷新',
           ),
         ],
-        bottom: TabBar(
-          controller: _tabController,
-          labelStyle: const TextStyle(fontSize: 12),
-          indicatorSize: TabBarIndicatorSize.tab,
-          tabs: const [
-            Tab(text: '文件'),
-            Tab(text: '当前进程'),
-            Tab(text: '文件写入'),
-          ],
-        ),
       ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [
-          _buildFilesTab(),
-          _buildProcessTab(),
-          _buildWriteHistoryTab(),
-        ],
-      ),
-    );
-  }
-
-  /// 文件标签页
-  Widget _buildFilesTab() {
-    return Column(
-      children: [
-        // 搜索栏和下载按钮
-        Container(
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surfaceVariant,
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: SizedBox(
-                  height: 36,
-                  child: TextField(
-                    controller: _searchController,
-                    onChanged: _onSearchChanged,
-                    style: const TextStyle(fontSize: 13),
-                    decoration: InputDecoration(
-                      hintText: '搜索文件...',
-                      hintStyle: const TextStyle(fontSize: 13),
-                      prefixIcon: const Icon(Icons.search, size: 18),
-                      contentPadding: const EdgeInsets.symmetric(vertical: 0),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8),
-                        borderSide: BorderSide.none,
-                      ),
-                      filled: true,
-                      fillColor: Theme.of(context).colorScheme.surface,
-                    ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _rootNodes.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.folder_off, size: 56, color: Colors.grey.shade400),
+                      const SizedBox(height: 12),
+                      Text('空目录', style: TextStyle(color: Colors.grey.shade500, fontSize: 15)),
+                    ],
                   ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              IconButton(
-                icon: const Icon(Icons.download, size: 20),
-                onPressed: _downloadProject,
-                tooltip: '下载项目',
-                style: IconButton.styleFrom(
-                  backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-                ),
-              ),
-            ],
-          ),
-        ),
-        // 文件树
-        Expanded(
-          child: _isLoading
-              ? const Center(child: CircularProgressIndicator())
-              : _filteredItems.isEmpty
-                  ? Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            _searchQuery.isEmpty ? Icons.folder_off : Icons.search_off,
-                            size: 48,
-                            color: Colors.grey,
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            _searchQuery.isEmpty ? '空目录' : '未找到文件',
-                            style: const TextStyle(color: Colors.grey),
-                          ),
-                        ],
+                )
+              : Column(
+                  children: [
+                    // 路径面包屑
+                    _buildBreadcrumb(theme),
+                    // 文件树
+                    Expanded(
+                      child: ListView.builder(
+                        padding: const EdgeInsets.only(bottom: 80),
+                        itemCount: _rootNodes.length,
+                        itemBuilder: (context, index) {
+                          return _buildNode(_rootNodes[index], depth: 0);
+                        },
                       ),
-                    )
-                  : ListView.builder(
-                      itemCount: _filteredItems.length,
-                      itemBuilder: (context, index) {
-                        return _buildTreeItem(_filteredItems[index], 0);
-                      },
                     ),
-        ),
-      ],
-    );
-  }
-
-  /// 构建文件树项
-  Widget _buildTreeItem(FileTreeItem item, int level) {
-    final indent = level * 16.0;
-
-    if (item.isDirectory) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          InkWell(
-            onTap: () async {
-              setState(() {
-                item.isExpanded = !item.isExpanded;
-              });
-              if (item.isExpanded && item.children.isEmpty) {
-                final children = await _readDirectory(item.path);
-                setState(() {
-                  item.children = children;
-                });
-              }
-            },
-            onLongPress: () => _showDirectoryContextMenu(context, item),
-            child: Container(
-              padding: EdgeInsets.only(
-                left: indent + 8,
-                right: 8,
-                top: 8,
-                bottom: 8,
+                  ],
+                ),
+      // 底部状态栏
+      bottomNavigationBar: _isLoading
+          ? null
+          : Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerHighest,
+                border: Border(top: BorderSide(color: theme.dividerColor, width: 0.5)),
               ),
               child: Row(
                 children: [
-                  Icon(
-                    item.isExpanded ? Icons.expand_more : Icons.chevron_right,
-                    size: 18,
-                    color: Colors.grey,
-                  ),
+                  Icon(Icons.folder, size: 14, color: theme.colorScheme.onSurfaceVariant),
                   const SizedBox(width: 4),
+                  Text(
+                    '${_countDirs(_rootNodes)} 个文件夹',
+                    style: TextStyle(fontSize: 11, color: theme.colorScheme.onSurfaceVariant),
+                  ),
+                  const SizedBox(width: 16),
+                  Icon(Icons.insert_drive_file, size: 14, color: theme.colorScheme.onSurfaceVariant),
+                  const SizedBox(width: 4),
+                  Text(
+                    '${_countFiles(_rootNodes)} 个文件',
+                    style: TextStyle(fontSize: 11, color: theme.colorScheme.onSurfaceVariant),
+                  ),
+                  const Spacer(),
+                  Text(
+                    p.basename(widget.projectPath),
+                    style: TextStyle(fontSize: 11, color: theme.colorScheme.onSurfaceVariant),
+                  ),
+                ],
+              ),
+            ),
+    );
+  }
+
+  /// 路径面包屑
+  Widget _buildBreadcrumb(ThemeData theme) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHigh,
+        border: Border(bottom: BorderSide(color: theme.dividerColor, width: 0.5)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.home, size: 14, color: theme.colorScheme.onSurfaceVariant),
+          const SizedBox(width: 4),
+          Expanded(
+            child: Text(
+              widget.projectPath,
+              style: TextStyle(
+                fontSize: 11,
+                color: theme.colorScheme.onSurfaceVariant,
+                fontFamily: 'monospace',
+              ),
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 构建树节点
+  Widget _buildNode(FileTreeNode node, {required int depth}) {
+    final theme = Theme.of(context);
+    final indent = depth * 20.0;
+    final isSelected = _selectedPath == node.path;
+
+    if (node.isDirectory) {
+      return _buildFolderNode(node, depth, indent, isSelected, theme);
+    } else {
+      return _buildFileNode(node, indent, isSelected, theme);
+    }
+  }
+
+  /// 构建文件夹节点
+  Widget _buildFolderNode(FileTreeNode node, int depth, double indent, bool isSelected, ThemeData theme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // 文件夹行
+        Material(
+          color: isSelected
+              ? theme.colorScheme.primaryContainer.withOpacity(0.4)
+              : Colors.transparent,
+          child: InkWell(
+            onTap: () async {
+              setState(() {
+                node.isExpanded = !node.isExpanded;
+                if (node.isExpanded) {
+                  _expandedPaths.add(node.path);
+                } else {
+                  _expandedPaths.remove(node.path);
+                }
+              });
+              // 懒加载子目录
+              if (node.isExpanded && node.children.isEmpty) {
+                final children = await _loadChildren(node.path);
+                setState(() {
+                  node.children.addAll(children);
+                });
+              }
+            },
+            onLongPress: () => _showContextMenu(node),
+            child: Container(
+              height: 32,
+              padding: EdgeInsets.only(left: indent + 8, right: 12),
+              child: Row(
+                children: [
+                  // 展开/折叠箭头
                   Icon(
-                    item.isExpanded ? Icons.folder_open : Icons.folder,
-                    size: 18,
-                    color: Colors.amber,
+                    node.isExpanded ? Icons.keyboard_arrow_down : Icons.keyboard_arrow_right,
+                    size: 16,
+                    color: Colors.grey.shade500,
+                  ),
+                  const SizedBox(width: 2),
+                  // 文件夹图标
+                  Icon(
+                    node.isExpanded ? Icons.folder_open : Icons.folder,
+                    size: 16,
+                    color: Colors.amber.shade700,
                   ),
                   const SizedBox(width: 8),
+                  // 文件夹名
                   Expanded(
                     child: Text(
-                      item.name,
-                      style: const TextStyle(fontSize: 13),
+                      node.name,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: theme.colorScheme.onSurface,
+                      ),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  _buildItemActions(item, isDirectory: true),
+                  // 子项数量
+                  if (node.children.isNotEmpty)
+                    Text(
+                      '${node.children.length}',
+                      style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+                    ),
                 ],
               ),
             ),
           ),
-          if (item.isExpanded)
-            ...item.children.map((child) => _buildTreeItem(child, level + 1)),
-        ],
-      );
-    } else {
-      return InkWell(
-        onTap: () => widget.onFileSelected(item.path),
-        onLongPress: () => _showFileContextMenu(context, item),
-        child: Container(
-          padding: EdgeInsets.only(
-            left: indent + 30,
-            right: 8,
-            top: 8,
-            bottom: 8,
+        ),
+        // 子节点（带动画）
+        AnimatedCrossFade(
+          firstChild: const SizedBox.shrink(),
+          secondChild: Column(
+            children: node.children.map((child) => _buildNode(child, depth: depth + 1)).toList(),
           ),
+          crossFadeState: node.isExpanded ? CrossFadeState.showSecond : CrossFadeState.showFirst,
+          duration: const Duration(milliseconds: 200),
+        ),
+      ],
+    );
+  }
+
+  /// 构建文件节点
+  Widget _buildFileNode(FileTreeNode node, double indent, bool isSelected, ThemeData theme) {
+    return Material(
+      color: isSelected
+          ? theme.colorScheme.primaryContainer.withOpacity(0.4)
+          : Colors.transparent,
+      child: InkWell(
+        onTap: () {
+          setState(() => _selectedPath = node.path);
+          widget.onFileSelected(node.path);
+        },
+        onLongPress: () => _showFileContextMenu(node),
+        child: Container(
+          height: 32,
+          padding: EdgeInsets.only(left: indent + 26, right: 12),
           child: Row(
             children: [
+              // 文件图标
               Icon(
-                _getFileIcon(item.name),
-                size: 16,
-                color: _getFileColor(item.name),
+                _getFileIcon(node.name),
+                size: 15,
+                color: _getFileColor(node.name),
               ),
               const SizedBox(width: 8),
+              // 文件名
               Expanded(
                 child: Text(
-                  item.name,
+                  node.name,
                   style: TextStyle(
                     fontSize: 13,
-                    color: _searchQuery.isNotEmpty &&
-                            item.name.toLowerCase().contains(_searchQuery)
-                        ? Theme.of(context).colorScheme.primary
-                        : null,
+                    color: isSelected ? theme.colorScheme.primary : theme.colorScheme.onSurface,
                   ),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              _buildItemActions(item, isDirectory: false),
+              // 文件大小
+              if (!node.isDirectory)
+                FutureBuilder<FileStat>(
+                  future: File(node.path).stat(),
+                  builder: (context, snapshot) {
+                    if (snapshot.hasData && snapshot.data!.type == FileSystemEntityType.file) {
+                      return Text(
+                        _formatSize(snapshot.data!.size),
+                        style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+                      );
+                    }
+                    return const SizedBox.shrink();
+                  },
+                ),
             ],
           ),
         ),
-      );
-    }
-  }
-
-  /// 构建项目操作按钮
-  Widget _buildItemActions(FileTreeItem item, {required bool isDirectory}) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (!isDirectory) ...[
-          IconButton(
-            icon: const Icon(Icons.open_in_new, size: 16),
-            onPressed: () => widget.onFileSelected(item.path),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
-            tooltip: '打开',
-          ),
-        ],
-        IconButton(
-          icon: const Icon(Icons.download, size: 16),
-          onPressed: () {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('下载 ${item.name}...'),
-                duration: const Duration(seconds: 1),
-              ),
-            );
-          },
-          padding: EdgeInsets.zero,
-          constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
-          tooltip: '下载',
-        ),
-      ],
+      ),
     );
   }
 
-  /// 显示目录上下文菜单
-  void _showDirectoryContextMenu(BuildContext context, FileTreeItem item) {
-    final RenderBox overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
-    final RenderBox button = context.findRenderObject() as RenderBox;
-    final Offset position = button.localToGlobal(Offset.zero, ancestor: overlay);
-
-    showMenu<String>(
+  /// 显示文件夹右键菜单
+  void _showContextMenu(FileTreeNode node) {
+    showModalBottomSheet(
       context: context,
-      position: RelativeRect.fromRect(
-        Rect.fromLTWH(position.dx, position.dy, button.size.width, button.size.height),
-        Offset.zero & overlay.size,
-      ),
-      items: [
-        const PopupMenuItem(
-          value: 'download',
-          child: Row(
-            children: [
-              Icon(Icons.download, size: 18),
-              SizedBox(width: 12),
-              Text('下载目录'),
-            ],
-          ),
-        ),
-        const PopupMenuItem(
-          value: 'refresh',
-          child: Row(
-            children: [
-              Icon(Icons.refresh, size: 18),
-              SizedBox(width: 12),
-              Text('刷新'),
-            ],
-          ),
-        ),
-        const PopupMenuItem(
-          value: 'expand_all',
-          child: Row(
-            children: [
-              Icon(Icons.unfold_more, size: 18),
-              SizedBox(width: 12),
-              Text('展开全部'),
-            ],
-          ),
-        ),
-        const PopupMenuItem(
-          value: 'collapse_all',
-          child: Row(
-            children: [
-              Icon(Icons.unfold_less, size: 18),
-              SizedBox(width: 12),
-              Text('折叠全部'),
-            ],
-          ),
-        ),
-      ],
-    ).then((value) {
-      if (value != null) {
-        _handleDirectoryMenuAction(value, item);
-      }
-    });
-  }
-
-  /// 处理目录菜单操作
-  void _handleDirectoryMenuAction(String action, FileTreeItem item) {
-    switch (action) {
-      case 'download':
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('下载 ${item.name}...')),
-        );
-        break;
-      case 'refresh':
-        _loadDirectory();
-        break;
-      case 'expand_all':
-        _expandAll(_rootItems);
-        break;
-      case 'collapse_all':
-        _collapseAll(_rootItems);
-        break;
-    }
-  }
-
-  /// 展开全部
-  void _expandAll(List<FileTreeItem> items) async {
-    for (var item in items) {
-      if (item.isDirectory) {
-        if (item.children.isEmpty) {
-          item.children = await _readDirectory(item.path);
-        }
-        item.isExpanded = true;
-        _expandAll(item.children);
-      }
-    }
-    setState(() {});
-  }
-
-  /// 折叠全部
-  void _collapseAll(List<FileTreeItem> items) {
-    for (var item in items) {
-      if (item.isDirectory) {
-        item.isExpanded = false;
-        _collapseAll(item.children);
-      }
-    }
-    setState(() {});
-  }
-
-  /// 显示文件上下文菜单
-  void _showFileContextMenu(BuildContext context, FileTreeItem item) {
-    final RenderBox overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
-    final RenderBox button = context.findRenderObject() as RenderBox;
-    final Offset position = button.localToGlobal(Offset.zero, ancestor: overlay);
-
-    showMenu<String>(
-      context: context,
-      position: RelativeRect.fromRect(
-        Rect.fromLTWH(position.dx, position.dy, button.size.width, button.size.height),
-        Offset.zero & overlay.size,
-      ),
-      items: [
-        const PopupMenuItem(
-          value: 'open',
-          child: Row(
-            children: [
-              Icon(Icons.open_in_new, size: 18),
-              SizedBox(width: 12),
-              Text('打开'),
-            ],
-          ),
-        ),
-        const PopupMenuItem(
-          value: 'download',
-          child: Row(
-            children: [
-              Icon(Icons.download, size: 18),
-              SizedBox(width: 12),
-              Text('下载'),
-            ],
-          ),
-        ),
-        const PopupMenuItem(
-          value: 'copy_path',
-          child: Row(
-            children: [
-              Icon(Icons.copy, size: 18),
-              SizedBox(width: 12),
-              Text('复制路径'),
-            ],
-          ),
-        ),
-      ],
-    ).then((value) {
-      if (value != null) {
-        _handleFileMenuAction(value, item);
-      }
-    });
-  }
-
-  /// 处理文件菜单操作
-  void _handleFileMenuAction(String action, FileTreeItem item) {
-    switch (action) {
-      case 'open':
-        widget.onFileSelected(item.path);
-        break;
-      case 'download':
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('下载 ${item.name}...')),
-        );
-        break;
-      case 'copy_path':
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('已复制路径: ${item.path}')),
-        );
-        break;
-    }
-  }
-
-  /// 当前进程标签页
-  Widget _buildProcessTab() {
-    if (_processes.isEmpty) {
-      return const Center(
+      builder: (context) => SafeArea(
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.check_circle_outline, size: 48, color: Colors.green),
-            SizedBox(height: 16),
-            Text(
-              '暂无运行中的任务',
-              style: TextStyle(fontSize: 16, color: Colors.grey),
-            ),
-          ],
-        ),
-      );
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.all(8),
-      itemCount: _processes.length,
-      itemBuilder: (context, index) {
-        final process = _processes[index];
-        return Card(
-          margin: const EdgeInsets.only(bottom: 8),
-          child: ListTile(
-            leading: Stack(
-              alignment: Alignment.center,
-              children: [
-                SizedBox(
-                  width: 40,
-                  height: 40,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 3,
-                    valueColor: AlwaysStoppedAnimation<Color>(
-                      Theme.of(context).colorScheme.primary,
+            // 标题
+            Container(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  Icon(Icons.folder, color: Colors.amber.shade700),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      node.name,
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                ),
-                const Icon(Icons.sync, size: 20),
-              ],
+                ],
+              ),
             ),
-            title: Text(
-              process.name,
-              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
-            ),
-            subtitle: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  process.description,
-                  style: const TextStyle(fontSize: 12),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  '开始于 ${_formatTime(process.startTime)}',
-                  style: const TextStyle(fontSize: 11, color: Colors.grey),
-                ),
-              ],
-            ),
-            trailing: IconButton(
-              icon: const Icon(Icons.cancel, color: Colors.red),
-              onPressed: () {
-                _cancelProcess(process);
+            const Divider(height: 1),
+            // 展开/折叠
+            ListTile(
+              leading: Icon(node.isExpanded ? Icons.unfold_less : Icons.unfold_more),
+              title: Text(node.isExpanded ? '折叠' : '展开'),
+              onTap: () {
+                Navigator.pop(context);
+                setState(() {
+                  node.isExpanded = !node.isExpanded;
+                  if (node.isExpanded) {
+                    _expandedPaths.add(node.path);
+                  } else {
+                    _expandedPaths.remove(node.path);
+                  }
+                });
               },
-              tooltip: '取消任务',
             ),
-          ),
-        );
-      },
-    );
-  }
-
-  /// 取消进程
-  void _cancelProcess(ProcessItem process) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('取消任务'),
-        content: Text('确定要取消 "${process.name}" 吗？'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('否'),
-          ),
-          TextButton(
-            onPressed: () {
-              setState(() {
-                _processes.removeWhere((p) => p.id == process.id);
-              });
-              Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('已取消 ${process.name}')),
-              );
-            },
-            child: const Text('是'),
-          ),
-        ],
+            // 展开全部子项
+            ListTile(
+              leading: const Icon(Icons.expand),
+              title: const Text('展开全部子项'),
+              onTap: () async {
+                Navigator.pop(context);
+                await _expandNodes([node]);
+                setState(() {});
+              },
+            ),
+            // 折叠全部子项
+            ListTile(
+              leading: const Icon(Icons.compress),
+              title: const Text('折叠全部子项'),
+              onTap: () {
+                Navigator.pop(context);
+                _collapseNodes([node]);
+                setState(() {});
+              },
+            ),
+            // 复制路径
+            ListTile(
+              leading: const Icon(Icons.copy),
+              title: const Text('复制路径'),
+              onTap: () {
+                Navigator.pop(context);
+                _copyPath(node.path);
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
       ),
     );
   }
 
-  /// 文件写入历史标签页
-  Widget _buildWriteHistoryTab() {
-    if (_writeHistory.isEmpty) {
-      return const Center(
+  /// 显示文件右键菜单
+  void _showFileContextMenu(FileTreeNode node) {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => SafeArea(
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.history, size: 48, color: Colors.grey),
-            SizedBox(height: 16),
-            Text(
-              '暂无写入历史',
-              style: TextStyle(fontSize: 16, color: Colors.grey),
+            // 标题
+            Container(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  Icon(_getFileIcon(node.name), color: _getFileColor(node.name)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      node.name,
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
             ),
+            const Divider(height: 1),
+            // 打开
+            ListTile(
+              leading: const Icon(Icons.open_in_new),
+              title: const Text('打开'),
+              onTap: () {
+                Navigator.pop(context);
+                widget.onFileSelected(node.path);
+              },
+            ),
+            // 复制路径
+            ListTile(
+              leading: const Icon(Icons.copy),
+              title: const Text('复制路径'),
+              onTap: () {
+                Navigator.pop(context);
+                _copyPath(node.path);
+              },
+            ),
+            // 复制文件名
+            ListTile(
+              leading: const Icon(Icons.text_fields),
+              title: const Text('复制文件名'),
+              onTap: () {
+                Navigator.pop(context);
+                _copyPath(node.name);
+              },
+            ),
+            const SizedBox(height: 8),
           ],
         ),
-      );
-    }
+      ),
+    );
+  }
 
-    return ListView.builder(
-      padding: const EdgeInsets.all(8),
-      itemCount: _writeHistory.length,
-      itemBuilder: (context, index) {
-        final record = _writeHistory[index];
-        return Card(
-          margin: const EdgeInsets.only(bottom: 8),
-          child: ListTile(
-            leading: Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: record.success
-                    ? Colors.green.withOpacity(0.1)
-                    : Colors.red.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Icon(
-                record.success ? Icons.check : Icons.error,
-                color: record.success ? Colors.green : Colors.red,
-              ),
-            ),
-            title: Text(
-              record.filePath,
-              style: const TextStyle(fontSize: 13),
-              overflow: TextOverflow.ellipsis,
-            ),
-            subtitle: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  record.operation,
-                  style: const TextStyle(fontSize: 12),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  _formatTime(record.time),
-                  style: const TextStyle(fontSize: 11, color: Colors.grey),
-                ),
-              ],
-            ),
-            trailing: IconButton(
-              icon: const Icon(Icons.undo, size: 20),
-              onPressed: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('还原功能开发中...')),
-                );
-              },
-              tooltip: '还原',
-            ),
-          ),
-        );
-      },
+  /// 复制路径到剪贴板
+  void _copyPath(String path) {
+    Clipboard.setData(ClipboardData(text: path));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('已复制: $path'),
+        duration: const Duration(seconds: 1),
+      ),
     );
   }
 }
