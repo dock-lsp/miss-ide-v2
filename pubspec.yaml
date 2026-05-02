@@ -1,0 +1,57 @@
+name: miss_ide
+description: "Miss IDE v2 - 移动端智能集成开发环境"
+publish_to: 'none'
+version: 2.0.0+1
+
+environment:
+  sdk: ^3.2.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # UI
+  cupertino_icons: ^1.0.6
+  google_fonts: ^6.1.0
+  
+  # 状态管理 - Riverpod
+  flutter_riverpod: ^2.4.9
+  
+  # 网络
+  http: ^1.1.0
+  web_socket_channel: ^2.4.0
+  dio: ^5.4.0
+  
+  # 存储
+  shared_preferences: ^2.2.2
+  path_provider: ^2.1.1
+  flutter_secure_storage: ^9.0.0
+  
+  # 文件系统
+  file_picker: ^6.1.1
+  path: ^1.8.3
+  permission_handler: ^11.0.1
+  
+  # 代码高亮
+  flutter_highlight: ^0.7.0
+  highlight: ^0.7.0
+  
+  # Markdown
+  flutter_markdown: ^0.6.18
+  
+  # 工具
+  uuid: ^4.2.2
+  collection: ^1.18.0
+  intl: ^0.18.1
+  url_launcher: ^6.2.1
+  
+  # 压缩文件支持
+  archive: ^3.4.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
+flutter:
+  uses-material-design: true
